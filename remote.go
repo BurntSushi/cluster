@@ -4,6 +4,7 @@ import (
 	"encoding/gob"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 )
 
@@ -21,6 +22,11 @@ type Remote struct {
 	recv chan *message
 }
 
+// newRemote creates a new remote for the given cluster and updates the
+// cluster's knowledge of that remote. It must be called while the
+// remote locker is held.
+//
+// Also, a search for additional remotes is provoked.
 func newRemote(cluster *Cluster, addr *net.TCPAddr) *Remote {
 	r := &Remote{
 		cluster:     cluster,
@@ -30,15 +36,48 @@ func newRemote(cluster *Cluster, addr *net.TCPAddr) *Remote {
 		send:        make(chan *message),
 		recv:        make(chan *message),
 	}
-	// go r.healthy()
+	cluster.remotes[addrString(addr)] = r
+	cluster.history[addrString(addr)] = addr
+
+	// Route all data received from this remote to the cluster.
+	go func() {
+		for msg := range r.recv {
+			cluster.recv <- remoteMessage{r, msg}
+		}
+	}()
 	return r
 }
 
-// func (r *Remote) healthy() {
-// for _ = range time.Tick(5 * time.Second) {
-// r.debugf("health check")
-// }
-// }
+// Close cuts off the connection between the cluster and this remote.
+// All TCP connections are closed.
+func (r *Remote) Close() error {
+	r.connsLocker.Lock()
+	defer r.connsLocker.Unlock()
+
+	close(r.send)
+	errs := make([]string, 0)
+	for _, conn := range r.conns {
+		if err := conn.Close(); err != nil {
+			errs = append(errs, err.Error())
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("%s\n", strings.Join(errs, "\n"))
+	}
+	return nil
+}
+
+// sever is a wrapper around Close that is called internally as a goroutine.
+func (r *Remote) sever() {
+	r.cluster.remotesLocker.Lock()
+	defer r.cluster.remotesLocker.Unlock()
+
+	if err := r.Close(); err != nil {
+		r.logf(err.Error())
+	}
+	delete(r.cluster.remotes, addrString(r.addr))
+	r.debugf("REMOVED.")
+}
 
 // Add joins a remote node to the cluster and initializes the TCP connection
 // pool.
@@ -46,13 +85,16 @@ func newRemote(cluster *Cluster, addr *net.TCPAddr) *Remote {
 // Any other remote nodes known by the new node will also be added to the
 // current cluster, if possible.
 func (c *Cluster) Add(raddr string) error {
-	c.remotesLocker.Lock()
-	defer c.remotesLocker.Unlock()
-
 	addr, err := net.ResolveTCPAddr("tcp", raddr)
 	if err != nil {
 		return err
 	}
+	return c.add(addr)
+}
+
+func (c *Cluster) add(addr *net.TCPAddr) error {
+	c.remotesLocker.Lock()
+	defer c.remotesLocker.Unlock()
 
 	// If this remote already exists, then there's no need to continue.
 	key := addrString(addr)
@@ -66,15 +108,18 @@ func (c *Cluster) Add(raddr string) error {
 		return err
 	}
 
+	enc := gob.NewEncoder(conn)
+	dec := gob.NewDecoder(conn)
+
 	// Send initial join message.
 	handshake := mesg(msgJoin, c.Addr())
-	if err := rawSend(conn, handshake); err != nil {
+	if err := rawSend(conn, enc, handshake); err != nil {
 		conn.Close()
 		return err
 	}
 
 	// Receive the response and make sure it's kosher.
-	resp, err := rawRecv(conn)
+	resp, err := rawRecv(conn, dec)
 	if err != nil {
 		conn.Close()
 		return err
@@ -87,14 +132,18 @@ func (c *Cluster) Add(raddr string) error {
 	// All is well. Create the remote seeded with one connection.
 	// More connections will be added later.
 	r := newRemote(c, addr)
-	c.remotes[key] = r
-	r.addConn(conn)
+	r.addConn(conn, enc, dec)
+	go c.broadcast(mesg(msgIKnow, []*net.TCPAddr{r.addr}))
 
 	c.debugf("Handshake for (%s, %s) is complete.", c, r)
 	return nil
 }
 
-func (r *Remote) addConn(conn *net.TCPConn) {
+func (r *Remote) addConn(
+	conn *net.TCPConn,
+	enc *gob.Encoder,
+	dec *gob.Decoder,
+) {
 	r.connsLocker.Lock()
 	defer r.connsLocker.Unlock()
 
@@ -110,11 +159,10 @@ func (r *Remote) addConn(conn *net.TCPConn) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		reader := gob.NewDecoder(conn)
 		for {
 			m := new(message)
-			if err := reader.Decode(&m); err != nil {
-				r.logf("TCP read error for %s: %s", r, err)
+			if err := dec.Decode(&m); err != nil {
+				r.logf("TCP read error: %s", err)
 				readError <- struct{}{}
 				break
 			}
@@ -123,12 +171,12 @@ func (r *Remote) addConn(conn *net.TCPConn) {
 	}()
 	go func() {
 		defer wg.Done()
-		writer := gob.NewEncoder(conn)
 		for {
 			select {
 			case msg := <-r.send:
-				if err := writer.Encode(msg); err != nil {
-					r.logf("TCP write error for %s: %s", r.addr, err)
+				msg.To = r.addr
+				if err := enc.Encode(msg); err != nil {
+					r.logf("TCP write error: %s", err)
 
 					// Close the connection to make sure any pending read
 					// fails.
@@ -149,12 +197,18 @@ func (r *Remote) addConn(conn *net.TCPConn) {
 		defer r.connsLocker.Unlock()
 
 		conn.Close()
+		close(r.recv)
 		for i, other := range r.conns {
 			if conn == other {
-				r.debugf("Removing TCP connection for %s", r)
+				r.debugf("Removing a TCP connection")
 				r.conns = append(r.conns[:i], r.conns[i+1:]...)
-				return
+				break
 			}
+		}
+
+		// If there are no TCP connections left, close this remote down.
+		if len(r.conns) == 0 {
+			go r.sever()
 		}
 	}()
 
@@ -166,10 +220,10 @@ func (r *Remote) String() string {
 
 func (r *Remote) logf(format string, v ...interface{}) {
 	e := fmt.Sprintf(format, v...)
-	lg.Printf("Error for remote '%s': %s", r.String(), e)
+	lg.Printf("Error for remote (%s, %s): %s", r.cluster, r.String(), e)
 }
 
 func (r *Remote) debugf(format string, v ...interface{}) {
 	e := fmt.Sprintf(format, v...)
-	lg.Printf("DEBUG for remote '%s': %s", r.String(), e)
+	lg.Printf("DEBUG for remote (%s, %s): %s", r.cluster, r.String(), e)
 }

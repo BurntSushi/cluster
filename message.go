@@ -13,6 +13,8 @@ const (
 	msgUser discriminant = iota
 	msgJoin
 	msgJoinReply
+	msgWhoDoYouKnow
+	msgIKnow
 )
 
 func discriminantString(d discriminant) string {
@@ -23,13 +25,28 @@ func discriminantString(d discriminant) string {
 		return "JOIN"
 	case msgJoinReply:
 		return "JOIN REPLY"
+	case msgWhoDoYouKnow:
+		return "WHO DO YOU KNOW"
+	case msgIKnow:
+		return "I KNOW"
 	}
 	panic("bug")
+}
+
+type Message struct {
+	Payload []byte
+	From *Remote
 }
 
 type message struct {
 	D       discriminant
 	Payload []byte
+	To *net.TCPAddr
+}
+
+type remoteMessage struct {
+	From *Remote
+	*message
 }
 
 func mesg(d discriminant, data interface{}) *message {
@@ -48,7 +65,7 @@ func mesg(d discriminant, data interface{}) *message {
 		}
 		payload = b.Bytes()
 	}
-	return &message{d, payload}
+	return &message{d, payload, nil}
 }
 
 func (m *message) decodePayload(v interface{}) {
@@ -60,22 +77,20 @@ func (m *message) decodePayload(v interface{}) {
 }
 
 func (m *message) String() string {
-	return fmt.Sprintf("(%s, %d bytes)",
-		discriminantString(m.D), len(m.Payload))
+	return fmt.Sprintf("(%s, to: %s, %d bytes)",
+		discriminantString(m.D), m.To, len(m.Payload))
 }
 
-func rawSend(conn *net.TCPConn, m *message) error {
-	r := gob.NewEncoder(conn)
-	if err := r.Encode(&m); err != nil {
+func rawSend(conn *net.TCPConn, enc *gob.Encoder, m *message) error {
+	if err := enc.Encode(&m); err != nil {
 		return err
 	}
 	return nil
 }
 
-func rawRecv(conn *net.TCPConn) (*message, error) {
+func rawRecv(conn *net.TCPConn, dec *gob.Decoder) (*message, error) {
 	m := new(message)
-	r := gob.NewDecoder(conn)
-	if err := r.Decode(&m); err != nil {
+	if err := dec.Decode(&m); err != nil {
 		return nil, err
 	}
 	return m, nil

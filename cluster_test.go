@@ -1,46 +1,50 @@
 package cluster
 
 import (
+	"flag"
 	"fmt"
+	"log"
 	"testing"
 	"time"
 )
 
+var (
+	flagLocalPort = 0
+	flagRemoteHost = ""
+	flagRemotePort = 0
+)
+
+func init() {
+	flag.IntVar(&flagLocalPort, "lport", flagLocalPort, "Local port")
+	flag.StringVar(&flagRemoteHost, "rhost", flagRemoteHost, "Remote host")
+	flag.IntVar(&flagRemotePort, "rport", flagRemotePort, "Remote port")
+	flag.Parse()
+}
+
 func TestCluster(t *testing.T) {
-	c1, err := New("localhost:0")
-	if err != nil {
-		t.Fatal(err)
+	if flagLocalPort == 0 || len(flagRemoteHost) == 0 || flagRemotePort == 0 {
+		return
 	}
 
-	c2, err := New("localhost:0")
+	c, err := New(fmt.Sprintf("localhost:%d", flagLocalPort))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	time.Sleep(1 * time.Second)
 
-	if err := c1.Add(fmt.Sprintf("localhost:%d", c2.Addr().Port)); err != nil {
-		t.Fatal(err)
-	}
-	if err := c2.Add(fmt.Sprintf("localhost:%d", c1.Addr().Port)); err != nil {
-		t.Fatal(err)
+	raddr := fmt.Sprintf("%s:%d", flagRemoteHost, flagRemotePort)
+	if err := c.Add(raddr); err != nil {
+		log.Println(err)
 	}
 
-	r1 := oneRemote(c1)
-	r2 := oneRemote(c2)
+	c.broadcast(mesg(msgUser, "wat wat in the butt"))
+	m := <-c.Inbox
 
-	go func() {
-		r1.send <- mesg(msgUser, "cauchy")
-	}()
-	go func() {
-		r2.send <- mesg(msgUser, "plato")
-	}()
-
-	m1 := <-r1.recv
-	m2 := <-r2.recv
-
-	fmt.Printf("c1 received: %s\n", string(m1.Payload))
-	fmt.Printf("c2 received: %s\n", string(m2.Payload))
+	if m == nil {
+		t.Fatal("BAH")
+	}
+	fmt.Printf("received: %s\n", string(m.Payload))
 
 	select {}
 }
