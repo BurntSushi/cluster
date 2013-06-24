@@ -64,7 +64,7 @@ func main() {
 
 It's possible to achieve similar functionality of this package by using a real 
 distributed hash table, but the only one I could find written in Go was
-[Wendy](https://github.com/secondbit/wendy). However, I was not skilled enough 
+[Wendy](https://github.com/secondbit/wendy). I was not skilled enough 
 to get it to track peers as aggressively as I wanted. Since I expressly did not 
 want the ability to route messages through other nodes, I decided to write 
 something simpler.
