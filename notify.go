@@ -63,13 +63,7 @@ func (n *Node) RemoteChanged(f func(rs []Remote)) {
 func (n *Node) runRemoteChanged() {
 	go n.notify.locked(func() {
 		if n.notify.remoteChanged != nil {
-			n.remlock.RLock()
-			rs := make([]Remote, 0, len(n.remotes))
-			for _, r := range n.remotes {
-				rs = append(rs, r)
-			}
-			n.remlock.RUnlock()
-
+			rs := n.Remotes()
 			n.notify.remoteChanged(rs)
 		}
 	})

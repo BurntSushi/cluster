@@ -14,6 +14,7 @@ const (
 	msgJoin discriminant = iota
 	msgJoinReply
 	msgRemove
+	msgUnknown
 	msgWhoDoYouKnow
 	msgIKnow
 	msgHealthy
@@ -51,13 +52,13 @@ type message struct {
 }
 
 func (n *Node) send(to Remote, d discriminant, data []byte) error {
-	if d > msgJoinReply && !n.knows(to) {
+	if d > msgUnknown && !n.knows(to) {
 		return fmt.Errorf("I do not know about remote '%s'.", to)
 	}
 
 	conn, err := net.DialTimeout("tcp", to.String(), n.getNetworkTimeout())
 	if err != nil {
-		go n.unlearn(to)
+		go n.unlearn(to, false)
 		return err
 	}
 	defer conn.Close()
@@ -67,12 +68,12 @@ func (n *Node) send(to Remote, d discriminant, data []byte) error {
 
 	deadline := time.Now().Add(n.getNetworkTimeout())
 	if err := conn.SetWriteDeadline(deadline); err != nil {
-		go n.unlearn(to)
+		go n.unlearn(to, false)
 		return err
 	}
 	if err := enc.Encode(&m); err != nil {
 		if isNetError(err) {
-			go n.unlearn(to)
+			go n.unlearn(to, false)
 		}
 		return err
 	}

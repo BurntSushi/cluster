@@ -6,6 +6,13 @@ import (
 	"time"
 )
 
+// Node corresponds to a single local entity in a cluster. Messages sent to
+// this node must be retrieved by reading from the Inbox channel. Note that if
+// messages are never read, the channel buffer will fill and the Node will
+// stop functioning until messages are drained.
+//
+// There is no restriction on the number of nodes that may exist in a single
+// program.
 type Node struct {
 	Inbox chan *Message
 
@@ -22,6 +29,7 @@ type Node struct {
 	durReconnect time.Duration
 	durHealthy   time.Duration
 	durNetwork   time.Duration
+	debug        bool
 
 	wg              *sync.WaitGroup
 	demultiplexQuit chan struct{}
@@ -29,7 +37,22 @@ type Node struct {
 	reconnectQuit   chan struct{}
 }
 
+// New creates a new Node that can be used immediately. In order to communicate
+// with other nodes, remotes must be added with the Add method.
+//
+// The local address should be of the form "host:port". If the port is 0,
+// then one will be chosen for you automatically. The chosen port can be
+// accessed with the Addr method.
 func New(laddr string) (*Node, error) {
+	return newNode(laddr, false,
+		5*time.Minute, 30*time.Second, 10*time.Second)
+}
+
+func newNode(
+	laddr string,
+	debug bool,
+	reconnect, healthy, network time.Duration,
+) (*Node, error) {
 	inbox := make(chan *Message, 100)
 	n := &Node{
 		Inbox:   inbox,
@@ -41,9 +64,10 @@ func New(laddr string) (*Node, error) {
 		recv:    make(chan *message),
 
 		optlock:      new(sync.RWMutex),
-		durReconnect: 5 * time.Minute,
-		durHealthy:   30 * time.Second,
-		durNetwork:   10 * time.Second,
+		durReconnect: reconnect,
+		durHealthy:   healthy,
+		durNetwork:   network,
+		debug:        debug,
 
 		wg:              new(sync.WaitGroup),
 		demultiplexQuit: make(chan struct{}),
@@ -68,6 +92,7 @@ func New(laddr string) (*Node, error) {
 			}
 			go n.serve(conn)
 		}
+		n.kill()
 	}()
 
 	go n.demultiplex()
@@ -105,26 +130,38 @@ func (n *Node) Broadcast(payload []byte) {
 // Other nodes will not attempt reconnection.
 func (n *Node) Close() {
 	n.broadcast(msgRemove, nil)
-	close(n.Inbox)
-
 	n.tcp.Close()
+}
+
+func (n *Node) kill() {
+	close(n.Inbox)
 	n.healthyQuit <- struct{}{}
 	n.reconnectQuit <- struct{}{}
 	n.demultiplexQuit <- struct{}{}
 
 	n.wg.Wait()
+	for _, r := range n.Remotes() {
+		n.unlearn(r, true)
+	}
 }
 
 // CloseRemote gracefully closes a connection with the remote specified.
 // No automatic reconnection will be made.
 func (n *Node) CloseRemote(r Remote) {
 	n.send(r, msgRemove, nil)
-	n.unlearn(r)
+	n.unlearn(r, true)
+}
 
-	// Wipe it from the history too, so we don't attempt a reconnect.
-	n.remlock.Lock()
-	delete(n.history, r.String())
-	n.remlock.Unlock()
+// Remotes returns a slice of all remotes known by the node.
+func (n *Node) Remotes() []Remote {
+	n.remlock.RLock()
+	defer n.remlock.RUnlock()
+
+	rs := make([]Remote, 0, len(n.remotes))
+	for _, r := range n.remotes {
+		rs = append(rs, r)
+	}
+	return rs
 }
 
 // SetReconnectInterval specifies the interval at which reconnection is
@@ -180,4 +217,19 @@ func (n *Node) getNetworkTimeout() time.Duration {
 	defer n.optlock.RUnlock()
 
 	return n.durNetwork
+}
+
+// SetDebug, when `on` is true, will output more messages to stderr.
+func (n *Node) SetDebug(on bool) {
+	n.optlock.Lock()
+	defer n.optlock.Unlock()
+
+	n.debug = on
+}
+
+func (n *Node) getDebug() bool {
+	n.optlock.RLock()
+	defer n.optlock.RUnlock()
+
+	return n.debug
 }

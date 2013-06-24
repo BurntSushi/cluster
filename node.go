@@ -111,12 +111,21 @@ func (n *Node) demultiplex() {
 				n.learn(msg.From)
 			case msgJoinReply:
 				n.learn(msg.From)
-			default:
+			case msgHealthy:
 				if !n.knows(msg.From) {
-					n.logf("MSG %s from unknown remote '%s'.", msg.D, msg.From)
-					n.learn(msg.From)
+					n.send(msg.From, msgUnknown, nil)
 				}
-				n.handle(msg)
+			case msgUnknown:
+				if n.knows(msg.From) {
+					n.add(msg.From)
+				}
+			default:
+				if n.knows(msg.From) {
+					n.handle(msg)
+				} else {
+					n.logf("Ignoring message %s from unknown remote '%s'.",
+						msg.D, msg.From)
+				}
 			}
 		}
 	}
@@ -129,10 +138,9 @@ func (n *Node) handle(msg *message) {
 	switch msg.D {
 	case msgUser:
 		n.Inbox <- &Message{msg.From, msg.Payload}
-	case msgHealthy:
-		// do nothing for now.
 	case msgRemove:
-		n.CloseRemote(msg.From)
+		// A graceful remove, so wipe the history.
+		n.unlearn(msg.From, true)
 	case msgWhoDoYouKnow:
 		n.shareKnowledge(msg.From)
 	case msgIKnow:
@@ -178,6 +186,17 @@ func (n *Node) knows(r Remote) bool {
 	return ok
 }
 
+func (n *Node) inHistory(r Remote) bool {
+	n.remlock.RLock()
+	defer n.remlock.RUnlock()
+
+	if r.equal(remote(n.Addr())) {
+		return true
+	}
+	_, ok := n.history[r.String()]
+	return ok
+}
+
 func (n *Node) learn(r Remote) {
 	n.remlock.Lock()
 	defer n.remlock.Unlock()
@@ -199,7 +218,7 @@ func (n *Node) learn(r Remote) {
 	n.debugf("Learned new remote: %s", r)
 }
 
-func (n *Node) unlearn(r Remote) {
+func (n *Node) unlearn(r Remote, wipeHistory bool) {
 	n.remlock.Lock()
 	defer n.remlock.Unlock()
 
@@ -208,6 +227,9 @@ func (n *Node) unlearn(r Remote) {
 	}
 
 	delete(n.remotes, r.String())
+	if wipeHistory {
+		delete(n.history, r.String())
+	}
 	n.runRemoteRemoved(r)
 	n.runRemoteChanged()
 
@@ -239,8 +261,10 @@ func (n *Node) logf(format string, v ...interface{}) {
 }
 
 func (n *Node) debugf(format string, v ...interface{}) {
-	e := fmt.Sprintf(format, v...)
-	lg.Printf("DEBUG '%s': %s", n.String(), e)
+	if n.getDebug() {
+		e := fmt.Sprintf(format, v...)
+		lg.Printf("DEBUG '%s': %s", n.String(), e)
+	}
 }
 
 func connString(conn *net.TCPConn) string {
