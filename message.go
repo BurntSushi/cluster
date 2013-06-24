@@ -39,8 +39,13 @@ func (d discriminant) String() string {
 	panic("bug")
 }
 
+// Message represents data sent to your node from another node.
+// They can be retrieved via the Inbox channel of the corresponding node.
 type Message struct {
+	// The remote address of the sender.
 	From    Remote
+
+	// The content of the message.
 	Payload []byte
 }
 
