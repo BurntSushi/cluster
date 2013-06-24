@@ -1,301 +1,183 @@
 package cluster
 
 import (
-	"encoding/gob"
-	"fmt"
-	"log"
 	"net"
-	"os"
-	"strings"
 	"sync"
 	"time"
 )
 
-var (
-	lg *log.Logger
-)
+type Node struct {
+	Inbox chan *Message
 
-func init() {
-	lg = log.New(os.Stderr, "[cluster] ", log.Ltime)
-}
-
-type Cluster struct {
 	tcp *net.TCPListener
 
-	remotes       map[string]*Remote
-	remotesLocker *sync.Mutex
+	remotes map[string]Remote
+	history map[string]Remote
+	remlock *sync.RWMutex
 
-	// A history of every remote ever connected to during this session.
-	// Periodically, a reconnection with any remote in the history currently
-	// disconnected will be performed.
-	history        map[string]*net.TCPAddr
-	historicalQuit chan struct{}
+	notify *callbacks
+	recv   chan *message
 
-	connLimit       int
-	connLimitLocker *sync.Mutex
+	optlock      *sync.RWMutex
+	durReconnect time.Duration
+	durHealthy   time.Duration
+	durNetwork   time.Duration
 
-	explorerQuit chan struct{} // quits the explorer
-
-	// All messages (including internal) received come through here.
-	recv chan remoteMessage
-
-	// Messages can be received by reading from this channel.
-	Inbox <-chan *Message
+	wg              *sync.WaitGroup
+	demultiplexQuit chan struct{}
+	healthyQuit     chan struct{}
+	reconnectQuit   chan struct{}
 }
 
-// New creates a new cluster on the given address, which can
-// connect to other clusters. The address should be in the format "host:port".
-//
-// If the port is zero, then an open port will be chosen for you. It can be
-// discovered via the Addr method.
-func New(laddr string) (*Cluster, error) {
+func New(laddr string) (*Node, error) {
 	inbox := make(chan *Message, 100)
-	c := &Cluster{
-		tcp:             nil,
-		remotes:         make(map[string]*Remote),
-		remotesLocker:   new(sync.Mutex),
-		history:         make(map[string]*net.TCPAddr),
-		historicalQuit:  make(chan struct{}),
-		connLimit:       1,
-		connLimitLocker: new(sync.Mutex),
-		explorerQuit:    make(chan struct{}, 1),
-		recv:            make(chan remoteMessage),
-		Inbox:           inbox,
+	n := &Node{
+		Inbox:   inbox,
+		tcp:     nil,
+		remotes: make(map[string]Remote),
+		history: make(map[string]Remote),
+		remlock: new(sync.RWMutex),
+		notify:  newCallbacks(),
+		recv:    make(chan *message),
+
+		optlock:      new(sync.RWMutex),
+		durReconnect: 5 * time.Minute,
+		durHealthy:   30 * time.Second,
+		durNetwork:   10 * time.Second,
+
+		wg:              new(sync.WaitGroup),
+		demultiplexQuit: make(chan struct{}),
+		healthyQuit:     make(chan struct{}),
+		reconnectQuit:   make(chan struct{}),
 	}
 
 	addr, err := net.ResolveTCPAddr("tcp", laddr)
 	if err != nil {
 		return nil, err
 	}
-	if c.tcp, err = net.ListenTCP("tcp", addr); err != nil {
+	if n.tcp, err = net.ListenTCP("tcp", addr); err != nil {
 		return nil, err
 	}
 	go func() {
-		defer c.tcp.Close()
+		defer n.tcp.Close()
 		for {
-			conn, err := c.tcp.AcceptTCP()
+			conn, err := n.tcp.AcceptTCP()
 			if err != nil {
-				lg.Printf("Could not accept TCP connection: %s", err)
+				n.debugf("Could not accept TCP connection: %s", err)
 				break
 			}
-			go c.serve(conn)
+			go n.serve(conn)
 		}
 	}()
 
-	go c.historical()
-	go c.explorer()
-	go c.demultiplex(inbox)
-	return c, nil
+	go n.demultiplex()
+	go n.healthy()
+	go n.reconnect()
+
+	return n, nil
 }
 
-// historical tries to reconnect with any disconnected remotes.
-func (c *Cluster) historical() {
-	reconnect := func() {
-		c.remotesLocker.Lock()
-		defer c.remotesLocker.Unlock()
-
-		c.debugf("Looking at history for reconnection opportunities...")
-
-		for key, addr := range c.history {
-			if _, ok := c.remotes[key]; ok {
-				continue
-			}
-			go func() {
-				if err := c.add(addr); err != nil {
-					c.debugf("Could not reconnect with '%s': %s", key, err)
-				}
-			}()
-		}
-	}
-	for {
-		select {
-		case <-time.After(10 * time.Second):
-			reconnect()
-		case <-c.historicalQuit:
-			return
-		}
-	}
+// Addr returns the TCP address that the node is listening on.
+func (n *Node) Addr() *net.TCPAddr {
+	return n.tcp.Addr().(*net.TCPAddr)
 }
 
-// demultiplex teases out incoming messages.
-func (c *Cluster) demultiplex(inbox chan *Message) {
-	for rmsg := range c.recv {
-		switch rmsg.D {
-		case msgUser:
-			inbox <- &Message{rmsg.Payload, rmsg.From}
-		case msgWhoDoYouKnow:
-			c.sendRemotes(rmsg.From)
-		case msgIKnow:
-			var addrs []*net.TCPAddr
-			rmsg.decodePayload(&addrs)
-			c.learnRemotes(rmsg.To, addrs)
-		default:
-			c.logf("Unrecognized discriminant: %s", rmsg.D)
-		}
-	}
-	close(inbox)
+func (n *Node) String() string {
+	return n.Addr().String()
 }
 
-func (c *Cluster) learnRemotes(to *net.TCPAddr, addrs []*net.TCPAddr) {
-	for _, addr := range addrs {
-		if addrEqual(to, addr) {
-			continue
-		}
-		if err := c.add(addr); err != nil {
-			c.debugf("Could not connect with '%s': %s", addrString(addr), err)
-		}
-	}
-}
-
-func (c *Cluster) sendRemotes(r *Remote) {
-	c.remotesLocker.Lock()
-	defer c.remotesLocker.Unlock()
-
-	addrs := make([]*net.TCPAddr, 0)
-	for _, remote := range c.remotes {
-		if r != remote {
-			addrs = append(addrs, remote.addr)
-		}
-	}
-	r.send <- mesg(msgIKnow, addrs)
-}
-
-// explorer is a goroutine that asks remotes who they know.
-// It uses some clever tricks to try and find remotes quickly.
-func (c *Cluster) explorer() {
-	for {
-		select {
-		case <-time.After(60 * time.Second):
-			c.broadcast(mesg(msgWhoDoYouKnow, 0))
-		case <-c.explorerQuit:
-			return
-		}
-	}
-}
-
-// broadcast sends a message to all known remotes.
-func (c *Cluster) broadcast(m *message) {
-	c.remotesLocker.Lock()
-	defer c.remotesLocker.Unlock()
-
-	for _, r := range c.remotes {
-		r.send <- m
-	}
-}
-
-// MaxConns sets or retrieves the maximum number of TCP connections allowed
-// between two nodes. If `n` is zero or less, then the current limit is
-// eturned. Any other value sets to the limit to `n`.
-func (c *Cluster) MaxConns(n int) int {
-	c.connLimitLocker.Lock()
-	defer c.connLimitLocker.Unlock()
-
-	if n <= 0 {
-		return c.connLimit
-	}
-	c.connLimit = n
-	return 0
-}
-
-// Addr returns the TCP address that the cluster is listening on.
-func (c *Cluster) Addr() *net.TCPAddr {
-	return c.tcp.Addr().(*net.TCPAddr)
-}
-
-// String returns the canonical "ip:port" of the cluster.
-func (c *Cluster) String() string {
-	return addrString(c.Addr())
-}
-
-func (c *Cluster) serve(conn *net.TCPConn) {
-	if err := c.handshake(conn); err != nil {
-		c.logf("Invalid handshake for '%s': %s", connString(conn), err)
-		conn.Close()
-		return
-	}
-}
-
-func (c *Cluster) handshake(conn *net.TCPConn) error {
-	c.remotesLocker.Lock()
-	defer c.remotesLocker.Unlock()
-
-	enc := gob.NewEncoder(conn)
-	dec := gob.NewDecoder(conn)
-
-	// A handshake with an incoming remote connection has two steps:
-	// 1) The incoming connection sends a JOIN message with a payload that
-	// contains its cluster's TCP address, which acts as a uniquely
-	// identifying key.
-	// 2) This cluster responds with an OK message if the connection is
-	// valid
-	handshake, err := rawRecv(conn, dec)
+// Add joins the node to another node at the remote address specified.
+func (n *Node) Add(raddr string) error {
+	addr, err := net.ResolveTCPAddr("tcp", raddr)
 	if err != nil {
 		return err
 	}
-
-	var remoteAddr *net.TCPAddr
-	handshake.decodePayload(&remoteAddr)
-	key := addrString(remoteAddr)
-
-	if err := rawSend(conn, enc, mesg(msgJoinReply, "OK")); err != nil {
-		return err
-	}
-
-	// If the remote doesn't exist yet, we need to make it first.
-	r, ok := c.remotes[key]
-	if !ok {
-		r = newRemote(c, remoteAddr)
-	}
-	r.addConn(conn, enc, dec)
-	go c.broadcast(mesg(msgIKnow, []*net.TCPAddr{r.addr}))
-
-	c.debugf("Handshake for (%s, %s) is complete.", c, r)
-	return nil
+	return n.add(remote(addr))
 }
 
-// Close kills all connections with other clusters.
-func (c *Cluster) Close() error {
-	c.remotesLocker.Lock()
-	defer c.remotesLocker.Unlock()
-
-	errs := make([]string, 0)
-	if err := c.tcp.Close(); err != nil {
-		errs = append(errs, err.Error())
-	}
-	c.historicalQuit <- struct{}{}
-	c.explorerQuit <- struct{}{}
-	for _, r := range c.remotes {
-		if err := r.Close(); err != nil {
-			errs = append(errs, err.Error())
-		}
-	}
-	close(c.recv)
-	if len(errs) > 0 {
-		return fmt.Errorf("%s\n", strings.Join(errs, "\n"))
-	}
-	return nil
+// Broadcast sends the supplied message to every remote known by this node.
+func (n *Node) Broadcast(payload []byte) {
+	n.broadcast(msgUser, payload)
 }
 
-func (c *Cluster) logf(format string, v ...interface{}) {
-	e := fmt.Sprintf(format, v...)
-	lg.Printf("Error for cluster '%s': %s", c.String(), e)
+// Close gracefully shuts down this node from the cluster and returns only
+// after all goroutines associated with the node have stopped.
+// Other nodes will not attempt reconnection.
+func (n *Node) Close() {
+	n.broadcast(msgRemove, nil)
+	close(n.Inbox)
+
+	n.tcp.Close()
+	n.healthyQuit <- struct{}{}
+	n.reconnectQuit <- struct{}{}
+	n.demultiplexQuit <- struct{}{}
+
+	n.wg.Wait()
 }
 
-func (c *Cluster) debugf(format string, v ...interface{}) {
-	e := fmt.Sprintf(format, v...)
-	lg.Printf("DEBUG for cluster '%s': %s", c.String(), e)
+// CloseRemote gracefully closes a connection with the remote specified.
+// No automatic reconnection will be made.
+func (n *Node) CloseRemote(r Remote) {
+	n.send(r, msgRemove, nil)
+	n.unlearn(r)
+
+	// Wipe it from the history too, so we don't attempt a reconnect.
+	n.remlock.Lock()
+	delete(n.history, r.String())
+	n.remlock.Unlock()
 }
 
-func connString(conn *net.TCPConn) string {
-	laddr := addrString(conn.LocalAddr().(*net.TCPAddr))
-	raddr := addrString(conn.RemoteAddr().(*net.TCPAddr))
-	return fmt.Sprintf("(%s, %s)", laddr, raddr)
+// SetReconnectInterval specifies the interval at which reconnection is
+// attempted with disconnected remotes. The default interval is 5 minutes.
+//
+// Note that reconnection only applies to remotes that were ungracefully
+// disconnected from the cluster. A graceful disconnection can only happen
+// by calling Close or CloseRemote.
+func (n *Node) SetReconnectInterval(d time.Duration) {
+	n.optlock.Lock()
+	defer n.optlock.Unlock()
+
+	n.durReconnect = d
 }
 
-func addrString(addr *net.TCPAddr) string {
-	return fmt.Sprintf("%s:%d", addr.IP, addr.Port)
+func (n *Node) getReconnectInterval() time.Duration {
+	n.optlock.RLock()
+	defer n.optlock.RUnlock()
+
+	return n.durReconnect
 }
 
-func addrEqual(a1, a2 *net.TCPAddr) bool {
-	return a1.IP.Equal(a2.IP) && a1.Port == a2.Port && a1.Zone == a2.Zone
+// SetHealthyInterval specifies how often the health of all remotes known
+// by this node is checked. If a remote cannot receive a message, then it
+// is ungracefully removed from known remotes. The default interval is
+// 30 seconds.
+func (n *Node) SetHealthyInterval(d time.Duration) {
+	n.optlock.Lock()
+	defer n.optlock.Unlock()
+
+	n.durHealthy = d
+}
+
+func (n *Node) getHealthyInterval() time.Duration {
+	n.optlock.RLock()
+	defer n.optlock.RUnlock()
+
+	return n.durHealthy
+}
+
+// SetNetworkTimeout specifies how long a TCP send or receive will wait before
+// timing out the connection. If a remote times out, it is ungracefully
+// removed from known remotes. The default interval is 10 seconds.
+func (n *Node) SetNetworkTimeout(d time.Duration) {
+	n.optlock.Lock()
+	defer n.optlock.Unlock()
+
+	n.durNetwork = d
+}
+
+func (n *Node) getNetworkTimeout() time.Duration {
+	n.optlock.RLock()
+	defer n.optlock.RUnlock()
+
+	return n.durNetwork
 }

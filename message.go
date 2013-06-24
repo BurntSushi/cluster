@@ -5,19 +5,22 @@ import (
 	"encoding/gob"
 	"fmt"
 	"net"
+	"time"
 )
 
 type discriminant int
 
 const (
-	msgUser discriminant = iota
-	msgJoin
+	msgJoin discriminant = iota
 	msgJoinReply
+	msgRemove
 	msgWhoDoYouKnow
 	msgIKnow
+	msgHealthy
+	msgUser
 )
 
-func discriminantString(d discriminant) string {
+func (d discriminant) String() string {
 	switch d {
 	case msgUser:
 		return "USER"
@@ -29,27 +32,75 @@ func discriminantString(d discriminant) string {
 		return "WHO DO YOU KNOW"
 	case msgIKnow:
 		return "I KNOW"
+	case msgHealthy:
+		return "HEALTHY"
 	}
 	panic("bug")
 }
 
 type Message struct {
+	From    Remote
 	Payload []byte
-	From *Remote
 }
 
 type message struct {
 	D       discriminant
 	Payload []byte
-	To *net.TCPAddr
+	From    Remote
+	To      Remote
 }
 
-type remoteMessage struct {
-	From *Remote
-	*message
+func (n *Node) send(to Remote, d discriminant, data []byte) error {
+	if d > msgJoinReply && !n.knows(to) {
+		return fmt.Errorf("I do not know about remote '%s'.", to)
+	}
+
+	conn, err := net.DialTimeout("tcp", to.String(), n.getNetworkTimeout())
+	if err != nil {
+		go n.unlearn(to)
+		return err
+	}
+	defer conn.Close()
+
+	m := &message{d, data, remote(n.Addr()), to}
+	enc := gob.NewEncoder(conn)
+
+	deadline := time.Now().Add(n.getNetworkTimeout())
+	if err := conn.SetWriteDeadline(deadline); err != nil {
+		go n.unlearn(to)
+		return err
+	}
+	if err := enc.Encode(&m); err != nil {
+		if isNetError(err) {
+			go n.unlearn(to)
+		}
+		return err
+	}
+	return nil
 }
 
-func mesg(d discriminant, data interface{}) *message {
+func isNetError(err error) bool {
+	if _, ok := err.(net.Error); ok {
+		return true
+	}
+	return false
+}
+
+func (n *Node) receive(conn *net.TCPConn) (*message, error) {
+	dec := gob.NewDecoder(conn)
+	m := new(message)
+
+	deadline := time.Now().Add(n.getNetworkTimeout())
+	if err := conn.SetReadDeadline(deadline); err != nil {
+		return nil, err
+	}
+	if err := dec.Decode(&m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+func payload(data interface{}) ([]byte, error) {
 	// Special case the data to avoid unnecessary encoding/decoding.
 	var payload []byte
 	switch d := data.(type) {
@@ -61,37 +112,18 @@ func mesg(d discriminant, data interface{}) *message {
 		b := new(bytes.Buffer)
 		w := gob.NewEncoder(b)
 		if err := w.Encode(data); err != nil {
-			panic(err)
+			return nil, err
 		}
 		payload = b.Bytes()
 	}
-	return &message{d, payload, nil}
+	return payload, nil
 }
 
-func (m *message) decodePayload(v interface{}) {
+func (m *message) decodePayload(v interface{}) error {
 	b := bytes.NewReader(m.Payload)
 	r := gob.NewDecoder(b)
 	if err := r.Decode(v); err != nil {
-		panic(err)
-	}
-}
-
-func (m *message) String() string {
-	return fmt.Sprintf("(%s, to: %s, %d bytes)",
-		discriminantString(m.D), m.To, len(m.Payload))
-}
-
-func rawSend(conn *net.TCPConn, enc *gob.Encoder, m *message) error {
-	if err := enc.Encode(&m); err != nil {
 		return err
 	}
 	return nil
-}
-
-func rawRecv(conn *net.TCPConn, dec *gob.Decoder) (*message, error) {
-	m := new(message)
-	if err := dec.Decode(&m); err != nil {
-		return nil, err
-	}
-	return m, nil
 }

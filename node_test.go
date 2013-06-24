@@ -9,7 +9,7 @@ import (
 )
 
 var (
-	flagLocalPort = 0
+	flagLocalPort  = 0
 	flagRemoteHost = ""
 	flagRemotePort = 0
 )
@@ -26,32 +26,30 @@ func TestCluster(t *testing.T) {
 		return
 	}
 
-	c, err := New(fmt.Sprintf("localhost:%d", flagLocalPort))
+	node, err := New(fmt.Sprintf("localhost:%d", flagLocalPort))
 	if err != nil {
 		t.Fatal(err)
 	}
 
+	node.SetReconnectInterval(10 * time.Second)
+	node.SetHealthyInterval(10 * time.Second)
+
 	time.Sleep(1 * time.Second)
 
 	raddr := fmt.Sprintf("%s:%d", flagRemoteHost, flagRemotePort)
-	if err := c.Add(raddr); err != nil {
+	if err := node.Add(raddr); err != nil {
 		log.Println(err)
 	}
 
-	c.broadcast(mesg(msgUser, "wat wat in the butt"))
-	m := <-c.Inbox
-
-	if m == nil {
-		t.Fatal("BAH")
-	}
-	fmt.Printf("received: %s\n", string(m.Payload))
+	go func() {
+		for msg := range node.Inbox {
+			fmt.Printf("received: %s\n", string(msg.Payload))
+		}
+	}()
+	node.RemoteAdded(func(r Remote) {
+		fmt.Println("Broadcasting...")
+		node.Broadcast([]byte("wat wat in the butt. do it in my butt."))
+	})
 
 	select {}
-}
-
-func oneRemote(c *Cluster) *Remote {
-	for _, r := range c.remotes {
-		return r
-	}
-	return nil
 }
