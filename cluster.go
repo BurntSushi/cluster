@@ -121,8 +121,8 @@ func (n *Node) Add(raddr string) error {
 }
 
 // Broadcast sends the supplied message to every remote known by this node.
-func (n *Node) Broadcast(payload []byte) {
-	n.broadcast(msgUser, payload)
+func (n *Node) Broadcast(data []byte) {
+	n.broadcast(msgUser, data)
 }
 
 // Send sends the payload to the specified remote.
