@@ -9,9 +9,13 @@ of peer discovery. This also includes handling both graceful and ungraceful
 disconnections. In particular, if a node is disconnected ungracefully, other
 nodes will periodically try to reconnect with it.
 
+
 ## Installation
 
+```bash
 go get github.com/BurntSushi/cluster
+```
+
 
 ## Example
 
@@ -54,4 +58,28 @@ func main() {
     fmt.Println(string(m.Payload))
 }
 ```
+
+
+## Why?
+
+It's possible to achieve similar functionality of this package by using a real 
+distributed hash table, but the only one I could find written in Go was
+[Wendy](https://github.com/secondbit/wendy). However, I was not skilled enough 
+to get it to track peers as aggressively as I wanted. Since I expressly did not 
+want the ability to route messages through other nodes, I decided to write 
+something simpler.
+
+
+## Problems
+
+My experience with writing distributed programs is rather limited, so it's 
+quite probable I've made some amateur mistakes. With that said, here's what I 
+know is wrong thus far:
+
+* There is no protocol specified. It would be pretty easy to turn the existing 
+  implementation into a protocol, but I don't trust myself to do that. As of 
+  right now, the protocol is a simple message passing scheme using the
+  [GOB encoding](http://golang.org/pkg/encoding/gob/).
+
+* I've made no considerations for DoS. I'm not sure where to start either.
 
