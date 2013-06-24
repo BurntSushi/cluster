@@ -125,6 +125,14 @@ func (n *Node) Broadcast(payload []byte) {
 	n.broadcast(msgUser, payload)
 }
 
+// Send sends the payload to the specified remote.
+func (n *Node) Send(to Remote, data []byte) error {
+	if err := n.send(to, msgUser, data); err != nil {
+		return err
+	}
+	return nil
+}
+
 // Close gracefully shuts down this node from the cluster and returns only
 // after all goroutines associated with the node have stopped.
 // Other nodes will not attempt reconnection.
