@@ -22,6 +22,37 @@ func init() {
 	flag.Parse()
 }
 
+func ExampleBroadcast() {
+	// Start two nodes on a randomly chosen port.
+	n1, err := New("localhost:0")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	n2, err := New("localhost:0")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Make the two nodes aware of each other.
+	if err := n1.Add(n2.Addr().String()); err != nil {
+		log.Fatalf("Could not connect node 1 to node 2: %s", err)
+	}
+
+	// Wait for the remote to be added and then broadcast
+	// a message from node 1.
+	n1.RemoteAdded(func(_ Remote) {
+		n1.Broadcast([]byte("Hello, world!"))
+	})
+
+	// Receive the message in node 2's inbox and print.
+	m := <-n2.Inbox
+	fmt.Println(string(m.Payload))
+
+	// Output:
+	// Hello, world!
+}
+
 // Tests ungraceful disconnection by killing the TCP listener for one of
 // the nodes. The outcome should be that the other node (eventually) picks
 // up on it and unlearns the bad remote.
