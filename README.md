@@ -10,6 +10,11 @@ disconnections. In particular, if a node is disconnected ungracefully, other
 nodes will periodically try to reconnect with it.
 
 
+## Documentation
+
+http://godoc.org/github.com/BurntSushi/cluster
+
+
 ## Installation
 
 ```bash
