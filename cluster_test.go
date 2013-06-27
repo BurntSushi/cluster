@@ -202,6 +202,7 @@ func TestCluster(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	node.SetDebug(true)
 
 	node.SetReconnectInterval(10 * time.Second)
 	node.SetHealthyInterval(10 * time.Second)
