@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -16,7 +17,8 @@ import (
 type Node struct {
 	Inbox chan *Message
 
-	tcp *net.TCPListener
+	tcp   *net.TCPListener
+	laddr *net.TCPAddr
 
 	remotes map[string]Remote
 	history map[string]Remote
@@ -53,10 +55,12 @@ func newNode(
 	debug bool,
 	reconnect, healthy, network time.Duration,
 ) (*Node, error) {
+	var err error
 	inbox := make(chan *Message, 100)
 	n := &Node{
 		Inbox:   inbox,
 		tcp:     nil,
+		laddr:   nil,
 		remotes: make(map[string]Remote),
 		history: make(map[string]Remote),
 		remlock: new(sync.RWMutex),
@@ -75,12 +79,20 @@ func newNode(
 		reconnectQuit:   make(chan struct{}),
 	}
 
-	addr, err := net.ResolveTCPAddr("tcp", laddr)
+	if n.laddr, err = net.ResolveTCPAddr("tcp", laddr); err != nil {
+		return nil, err
+	}
+
+	addr, err := net.ResolveTCPAddr("tcp", fmt.Sprintf(":%d", n.laddr.Port))
 	if err != nil {
 		return nil, err
 	}
 	if n.tcp, err = net.ListenTCP("tcp", addr); err != nil {
 		return nil, err
+	}
+	if n.laddr.Port == 0 {
+		tcpAddr := n.tcp.Addr().(*net.TCPAddr)
+		n.laddr.Port = tcpAddr.Port
 	}
 	go func() {
 		defer n.tcp.Close()
@@ -104,7 +116,7 @@ func newNode(
 
 // Addr returns the TCP address that the node is listening on.
 func (n *Node) Addr() *net.TCPAddr {
-	return n.tcp.Addr().(*net.TCPAddr)
+	return n.laddr
 }
 
 func (n *Node) String() string {
