@@ -11,14 +11,14 @@ import (
 
 var (
 	flagLocalPort  = 0
-	flagRemoteHost = ""
 	flagRemotePort = 0
+	flagRemoteHost = ""
 )
 
 func init() {
 	flag.IntVar(&flagLocalPort, "lport", flagLocalPort, "Local port")
-	flag.StringVar(&flagRemoteHost, "rhost", flagRemoteHost, "Remote host")
 	flag.IntVar(&flagRemotePort, "rport", flagRemotePort, "Remote port")
+	flag.StringVar(&flagRemoteHost, "rhost", flagRemoteHost, "Remote host")
 	flag.Parse()
 }
 
@@ -188,7 +188,7 @@ func twoNodes(t *testing.T) (*Node, *Node) {
 }
 
 func isDebug() bool {
-	return flagLocalPort > 0 && len(flagRemoteHost) > 0 && flagRemotePort > 0
+	return flagLocalPort > 0 && flagRemotePort > 0 && len(flagRemoteHost) > 0
 }
 
 // This is a special debugging test that is run when the right flags are given
@@ -198,7 +198,7 @@ func TestCluster(t *testing.T) {
 		return
 	}
 
-	node, err := New(fmt.Sprintf("localhost:%d", flagLocalPort))
+	node, err := New(fmt.Sprintf(":%d", flagLocalPort))
 	if err != nil {
 		t.Fatal(err)
 	}
