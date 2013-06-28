@@ -132,8 +132,13 @@ func (n *Node) demultiplex() {
 
 			switch msg.D {
 			case msgJoin:
-				n.send(msg.From, msgJoinReply, msg.Payload)
-				n.learn(msg.From)
+				err := n.send(msg.From, msgJoinReply, msg.Payload)
+				if err != nil {
+					n.logf("Could not respond to JOIN from '%s': %s",
+						msg.From, err)
+				} else {
+					n.learn(msg.From)
+				}
 			case msgJoinReply:
 				var byWayOf Remote
 				if err := msg.decodePayload(&byWayOf); err != nil {
