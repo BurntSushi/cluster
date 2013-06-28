@@ -47,6 +47,23 @@ func (n *Node) healthy() {
 		defer n.remlock.RUnlock()
 
 		for _, r := range n.remotes {
+			lastheard, ok := n.lastheard[r.String()]
+			if !ok {
+				n.logf("Never heard from '%s'. Disconnecting.", r)
+
+				// Do a graceful disconnect since we've never heard from this
+				// remote. (A bug, perhaps?)
+				go n.CloseRemote(r)
+				continue
+			} else if time.Since(lastheard) > n.getHealthyInterval()*2 {
+				n.debugf("Remote '%s' hasn't responded in %s. Severing.", r,
+					n.getHealthyInterval()*2)
+
+				// Do an ungraceful disconnect since we might want to try
+				// reconnecting later.
+				go n.unlearn(r, false)
+				continue
+			}
 			if err := n.send(r, msgHealthy, nil); err != nil {
 				continue
 			}
@@ -109,6 +126,10 @@ func (n *Node) demultiplex() {
 		case <-n.demultiplexQuit:
 			return
 		case msg := <-n.recv:
+			n.remlock.Lock()
+			n.lastheard[msg.From.String()] = time.Now()
+			n.remlock.Unlock()
+
 			switch msg.D {
 			case msgJoin:
 				n.send(msg.From, msgJoinReply, msg.Payload)
@@ -138,6 +159,8 @@ func (n *Node) demultiplex() {
 			case msgHealthy:
 				if !n.knows(msg.From) {
 					n.send(msg.From, msgUnknown, nil)
+				} else {
+					n.send(msg.From, msgKeepAlive, nil)
 				}
 			case msgUnknown:
 				if n.knows(msg.From) {
@@ -176,6 +199,8 @@ func (n *Node) handle(msg *message) {
 		for _, r := range remotes {
 			n.add(r)
 		}
+	case msgKeepAlive:
+		// Nothing to see here. A keep alive works by updating "last heard".
 	default:
 		n.logf("Unknown message from '%s': %s", msg.From, msg.D)
 	}
@@ -253,6 +278,8 @@ func (n *Node) unlearn(r Remote, wipeHistory bool) {
 	delete(n.remotes, r.String())
 	if wipeHistory {
 		delete(n.history, r.String())
+		delete(n.lastheard, r.String())
+		// holding on to n.bywayof for now...
 	}
 	n.runRemoteRemoved(r)
 	n.runRemoteChanged()

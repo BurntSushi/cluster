@@ -18,6 +18,7 @@ const (
 	msgWhoDoYouKnow
 	msgIKnow
 	msgHealthy
+	msgKeepAlive
 	msgUser
 )
 

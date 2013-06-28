@@ -20,10 +20,11 @@ type Node struct {
 	tcp   *net.TCPListener
 	laddr *net.TCPAddr
 
-	remotes map[string]Remote
-	history map[string]Remote
-	bywayof map[string]Remote
-	remlock *sync.RWMutex
+	remotes   map[string]Remote
+	history   map[string]Remote
+	bywayof   map[string]Remote
+	lastheard map[string]time.Time
+	remlock   *sync.RWMutex
 
 	notify *callbacks
 	recv   chan *message
@@ -59,15 +60,16 @@ func newNode(
 	var err error
 	inbox := make(chan *Message, 100)
 	n := &Node{
-		Inbox:   inbox,
-		tcp:     nil,
-		laddr:   nil,
-		remotes: make(map[string]Remote),
-		history: make(map[string]Remote),
-		bywayof: make(map[string]Remote),
-		remlock: new(sync.RWMutex),
-		notify:  newCallbacks(),
-		recv:    make(chan *message),
+		Inbox:     inbox,
+		tcp:       nil,
+		laddr:     nil,
+		remotes:   make(map[string]Remote),
+		history:   make(map[string]Remote),
+		bywayof:   make(map[string]Remote),
+		lastheard: make(map[string]time.Time),
+		remlock:   new(sync.RWMutex),
+		notify:    newCallbacks(),
+		recv:      make(chan *message),
 
 		optlock:      new(sync.RWMutex),
 		durReconnect: reconnect,
