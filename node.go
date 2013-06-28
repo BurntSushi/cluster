@@ -151,10 +151,12 @@ func (n *Node) demultiplex() {
 				// initial address back, and we add it to the map here.
 				// Every subsequent send checks this table and uses the
 				// "by way of" address if it exists.
-				n.remlock.Lock()
-				n.debugf("Setting '%s' by way of '%s'", msg.From, byWayOf)
-				n.bywayof[msg.From.String()] = byWayOf
-				n.remlock.Unlock()
+				if !msg.From.equal(byWayOf) {
+					n.remlock.Lock()
+					n.debugf("Setting '%s' by way of '%s'", msg.From, byWayOf)
+					n.bywayof[msg.From.String()] = byWayOf
+					n.remlock.Unlock()
+				}
 
 				n.learn(msg.From)
 			case msgHealthy:
