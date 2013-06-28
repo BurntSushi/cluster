@@ -152,6 +152,7 @@ func (n *Node) demultiplex() {
 				// Every subsequent send checks this table and uses the
 				// "by way of" address if it exists.
 				n.remlock.Lock()
+				n.debugf("Setting '%s' by way of '%s'", msg.From, byWayOf)
 				n.bywayof[msg.From.String()] = byWayOf
 				n.remlock.Unlock()
 
