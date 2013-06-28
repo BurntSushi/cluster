@@ -22,6 +22,7 @@ type Node struct {
 
 	remotes map[string]Remote
 	history map[string]Remote
+	bywayof map[string]Remote
 	remlock *sync.RWMutex
 
 	notify *callbacks
@@ -63,6 +64,7 @@ func newNode(
 		laddr:   nil,
 		remotes: make(map[string]Remote),
 		history: make(map[string]Remote),
+		bywayof: make(map[string]Remote),
 		remlock: new(sync.RWMutex),
 		notify:  newCallbacks(),
 		recv:    make(chan *message),

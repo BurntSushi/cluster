@@ -43,7 +43,7 @@ func (d discriminant) String() string {
 // They can be retrieved via the Inbox channel of the corresponding node.
 type Message struct {
 	// The remote address of the sender.
-	From    Remote
+	From Remote
 
 	// The content of the message.
 	Payload []byte
@@ -56,12 +56,23 @@ type message struct {
 	To      Remote
 }
 
+func (n *Node) destination(r Remote) Remote {
+	n.remlock.RLock()
+	defer n.remlock.RUnlock()
+
+	if bywayof, ok := n.bywayof[r.String()]; ok {
+		return bywayof
+	}
+	return r
+}
+
 func (n *Node) send(to Remote, d discriminant, data []byte) error {
 	if d > msgUnknown && !n.knows(to) {
 		return fmt.Errorf("I do not know about remote '%s'.", to)
 	}
 
-	conn, err := net.DialTimeout("tcp", to.String(), n.getNetworkTimeout())
+	dest := n.destination(to)
+	conn, err := net.DialTimeout("tcp", dest.String(), n.getNetworkTimeout())
 	if err != nil {
 		go n.unlearn(to, false)
 		return err

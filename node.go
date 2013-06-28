@@ -28,7 +28,11 @@ func (n *Node) broadcast(d discriminant, payload []byte) {
 }
 
 func (n *Node) add(r Remote) error {
-	if err := n.send(r, msgJoin, nil); err != nil {
+	data, err := payload(r)
+	if err != nil {
+		return fmt.Errorf("Could not GOB encode remote '%s': %s", r, err)
+	}
+	if err := n.send(r, msgJoin, data); err != nil {
 		return err
 	}
 	return nil
@@ -107,9 +111,29 @@ func (n *Node) demultiplex() {
 		case msg := <-n.recv:
 			switch msg.D {
 			case msgJoin:
-				n.send(msg.From, msgJoinReply, nil)
+				n.send(msg.From, msgJoinReply, msg.Payload)
 				n.learn(msg.From)
 			case msgJoinReply:
+				var byWayOf Remote
+				if err := msg.decodePayload(&byWayOf); err != nil {
+					n.logf("Couldn't decode payload in '%s': %s", msg, err)
+					n.logf("Could not process JOIN from '%s'.", msg.From)
+					continue
+				}
+
+				// Upon sending an initial JOIN message, sometimes we connect
+				// through a different address (e.g., an ssh tunnel).
+				// Thus, the regular "remote" address of the TCP connection
+				// isn't good enough to know the right way to send a message.
+				// Therefore, every JOIN message includes the initial address
+				// used for connection. The JOIN_REPLY message sends the
+				// initial address back, and we add it to the map here.
+				// Every subsequent send checks this table and uses the
+				// "by way of" address if it exists.
+				n.remlock.Lock()
+				n.bywayof[msg.From.String()] = byWayOf
+				n.remlock.Unlock()
+
 				n.learn(msg.From)
 			case msgHealthy:
 				if !n.knows(msg.From) {
